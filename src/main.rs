@@ -261,31 +261,42 @@ fn main() {
     args.next();
 
     let statement = args.next().expect("First argument should be statement");
-
     let mut vars = HashMap::new();
-    while let (Some(key), Some(val)) = (args.next(), args.next()) {
+    while let Some(key) = args.next() {
         vars.insert(
             key.to_string(),
-            val.parse().expect("Failed to parse variable value"),
+            0f32,
         );
     }
-    let res = parse_and_execute(&statement, &vars);
 
-    match res {
-        Ok(v) => println!("{v}"),
-        Err(e) => {
-            println!("Failed to execute statement: {e}");
+    let mut total = 0f32;
+    for i in 0..1000000 {
+        for v in vars.values_mut() {
+            *v = i as f32;
+        }
 
-            let mut source = e.source();
-            if source.is_none() {
-                return;
-            }
 
-            println!("Caused by: ");
-            while let Some(v) = source {
-                println!("{v}");
-                source = v.source();
+        let res = parse_and_execute(&statement, &vars);
+        match res {
+            Ok(v) => total += v,
+            Err(e) => {
+                println!("Failed to execute statement: {e}");
+
+                let mut source = e.source();
+                if source.is_none() {
+                    return;
+                }
+
+                println!("Caused by: ");
+                while let Some(v) = source {
+                    println!("{v}");
+                    source = v.source();
+                }
             }
         }
     }
+
+    println!("total: {total}");
+
+
 }
