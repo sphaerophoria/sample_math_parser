@@ -3,6 +3,7 @@ use std::{cmp::Ordering, collections::HashMap, error::Error, fmt};
 #[derive(Debug)]
 enum Expression {
     Operation(Box<Operation>),
+    Variable(usize),
     Number(f32),
 }
 
@@ -108,10 +109,10 @@ impl Error for ParseError {
     }
 }
 
-fn get_number(token: &Token, var_lookup: &HashMap<String, f32>) -> Result<Expression, ParseError> {
+fn get_number(token: &Token, var_lookup: &HashMap<String, usize>) -> Result<Expression, ParseError> {
     match token {
         Token::Number(n) => Ok(Expression::Number(*n)),
-        Token::Variable(s) => Ok(Expression::Number(
+        Token::Variable(s) => Ok(Expression::Variable(
             *var_lookup
                 .get(s)
                 .ok_or(ParseError::UndefinedVaraible(s.clone()))?,
@@ -132,10 +133,10 @@ fn make_op(op: &Token, lhs: Expression, rhs: Expression) -> Result<Operation, Pa
     Ok(ret)
 }
 
-fn generate_operation(
+fn parse_tokens(
     lhs: Expression,
     tokens: &[Token],
-    var_lookup: &HashMap<String, f32>,
+    var_lookup: &HashMap<String, usize>,
 ) -> Result<Operation, ParseError> {
     match tokens.len().cmp(&2) {
         Ordering::Less => Err(ParseError::NotEnoughTokens),
@@ -151,11 +152,11 @@ fn generate_operation(
 
             if next_op < this_op {
                 // next op has higher priority, so number is the lhs of the next operation
-                let rhs = generate_operation(num, &tokens[2..], var_lookup)?;
+                let rhs = parse_tokens(num, &tokens[2..], var_lookup)?;
                 make_op(this_op, lhs, Expression::Operation(Box::new(rhs)))
             } else {
                 let lhs = make_op(this_op, lhs, num)?;
-                generate_operation(
+                parse_tokens(
                     Expression::Operation(Box::new(lhs)),
                     &tokens[2..],
                     var_lookup,
@@ -165,40 +166,50 @@ fn generate_operation(
     }
 }
 
-fn resolve_expression(expression: &Expression) -> f32 {
+fn resolve_expression(expression: &Expression, vars: &[f32]) -> f32 {
     match expression {
-        Expression::Operation(i) => execute_operation(i),
+        Expression::Operation(i) => execute_operation(i, vars),
         Expression::Number(n) => *n,
+        Expression::Variable(i) => vars[*i],
     }
 }
 
-fn execute_operation(operation: &Operation) -> f32 {
+fn execute_operation(operation: &Operation, vars: &[f32]) -> f32 {
     match operation {
-        Operation::Add(a, b) => resolve_expression(a) + resolve_expression(b),
-        Operation::Mul(a, b) => resolve_expression(a) * resolve_expression(b),
-        Operation::Div(a, b) => resolve_expression(a) / resolve_expression(b),
-        Operation::Sub(a, b) => resolve_expression(a) - resolve_expression(b),
+        Operation::Add(a, b) => resolve_expression(a, vars) + resolve_expression(b, vars),
+        Operation::Mul(a, b) => resolve_expression(a, vars) * resolve_expression(b, vars),
+        Operation::Div(a, b) => resolve_expression(a, vars) / resolve_expression(b, vars),
+        Operation::Sub(a, b) => resolve_expression(a, vars) - resolve_expression(b, vars),
     }
 }
 
-fn parse_tokens_and_exeucte(
-    tokens: &[Token],
-    var_lookup: &HashMap<String, f32>,
-) -> Result<f32, ParseError> {
-    let operation = generate_operation(
+fn parse(input: &str, var_lookup: &HashMap<String, usize>) -> Result<Operation, ParseError> {
+    let tokens = lex(input).map_err(ParseError::LexerError)?;
+
+    parse_tokens(
         get_number(&tokens[0], var_lookup)?,
         &tokens[1..],
         var_lookup,
-    )?;
+    )
 
-    Ok(execute_operation(&operation))
+}
+
+fn prepare_var_lookup(var_lookup: &HashMap<String, f32>) -> (HashMap<String, usize>, Vec<f32>) {
+    var_lookup.iter()
+        .enumerate()
+        .map(|(i, (k, v))| {
+            ((k.clone(), i), v)
+        })
+        .unzip()
 }
 
 fn parse_and_execute(input: &str, var_lookup: &HashMap<String, f32>) -> Result<f32, ParseError> {
-    let tokens = lex(input).map_err(ParseError::LexerError)?;
+    let (key_lookup, args) = prepare_var_lookup(var_lookup);
+    let operation = parse(input, &key_lookup)?;
 
-    parse_tokens_and_exeucte(&tokens, var_lookup)
+    Ok(execute_operation(&operation, &args))
 }
+
 
 #[cfg(test)]
 mod test {
@@ -262,38 +273,43 @@ fn main() {
 
     let statement = args.next().expect("First argument should be statement");
     let mut vars = HashMap::new();
-    while let Some(key) = args.next() {
+    for key in args {
         vars.insert(
             key.to_string(),
             0f32,
         );
     }
 
+    let (var_lookup, mut args) = prepare_var_lookup(&vars);
+
+    let operation = parse(&statement, &var_lookup);
+    let operation = match operation {
+        Ok(v) => v,
+        Err(e) => {
+            println!("Failed to execute statement: {e}");
+
+            let mut source = e.source();
+            if source.is_none() {
+                return;
+            }
+
+            println!("Caused by: ");
+            while let Some(v) = source {
+                println!("{v}");
+                source = v.source();
+            }
+            return;
+        }
+    };
+
     let mut total = 0f32;
     for i in 0..1000000 {
-        for v in vars.values_mut() {
+        for v in &mut args {
             *v = i as f32;
         }
 
 
-        let res = parse_and_execute(&statement, &vars);
-        match res {
-            Ok(v) => total += v,
-            Err(e) => {
-                println!("Failed to execute statement: {e}");
-
-                let mut source = e.source();
-                if source.is_none() {
-                    return;
-                }
-
-                println!("Caused by: ");
-                while let Some(v) = source {
-                    println!("{v}");
-                    source = v.source();
-                }
-            }
-        }
+        total += execute_operation(&operation, &args);
     }
 
     println!("total: {total}");
