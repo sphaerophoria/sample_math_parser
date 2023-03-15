@@ -40,30 +40,27 @@ impl<'a> Iterator for Lexer<'a> {
     type Item = Result<Token, std::num::ParseFloatError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut it = self.input.chars().enumerate().peekable();
+        let start = match self.input.find(|c: char| !c.is_whitespace()) {
+            Some(v) => v,
+            None => return None,
+        };
 
-        while let Some((_, _)) = it.next_if(|(_, c)| c.is_whitespace()) {}
+        let length = match self.input[start..].find(char::is_whitespace) {
+            Some(v) => v,
+            None => self.input[start..].len()
+        };
 
-        let mut s = String::new();
-        while let Some((_, c)) = it.next_if(|(_, c)| !c.is_whitespace()) {
-            s.push(c);
-        }
+        let s = &self.input[start..start+length];
+        self.input = &self.input[start + length..];
 
-        if s.is_empty() {
-            return None;
-        }
-
-        let next_start = it.next().map(|(i, _)| i).unwrap_or(self.input.len());
-        self.input = &self.input[next_start..];
-
-        match s.as_str() {
+        match s {
             "+" => Some(Ok(Token::Add)),
             "-" => Some(Ok(Token::Sub)),
             "*" => Some(Ok(Token::Mul)),
             "/" => Some(Ok(Token::Div)),
             _ => {
                 if s.chars().next().unwrap().is_alphabetic() {
-                    Some(Ok(Token::Variable(s)))
+                    Some(Ok(Token::Variable(s.to_string())))
                 } else {
                     Some(s.parse().map(Token::Number))
                 }
@@ -203,17 +200,18 @@ fn prepare_var_lookup(var_lookup: &HashMap<String, f32>) -> (HashMap<String, usi
         .unzip()
 }
 
-fn parse_and_execute(input: &str, var_lookup: &HashMap<String, f32>) -> Result<f32, ParseError> {
-    let (key_lookup, args) = prepare_var_lookup(var_lookup);
-    let operation = parse(input, &key_lookup)?;
-
-    Ok(execute_operation(&operation, &args))
-}
-
 
 #[cfg(test)]
 mod test {
+
     use super::*;
+
+    fn parse_and_execute(input: &str, var_lookup: &HashMap<String, f32>) -> Result<f32, ParseError> {
+        let (key_lookup, args) = prepare_var_lookup(var_lookup);
+        let operation = parse(input, &key_lookup)?;
+
+        Ok(execute_operation(&operation, &args))
+    }
 
     #[test]
     fn simple_addition() {
