@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, error::Error, fmt};
+use std::{cmp::Ordering, collections::HashMap, error::Error, fmt, str::FromStr};
 
 #[derive(Debug)]
 enum Expression {
@@ -26,51 +26,56 @@ enum Token {
     Add,
 }
 
-struct Lexer<'a> {
-    input: &'a str,
-}
+impl FromStr for Token {
+    type Err = std::num::ParseFloatError;
 
-impl<'a> Lexer<'a> {
-    fn new(input: &'a str) -> Lexer<'a> {
-        Lexer { input }
-    }
-}
-
-impl<'a> Iterator for Lexer<'a> {
-    type Item = Result<Token, std::num::ParseFloatError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = match self.input.find(|c: char| !c.is_whitespace()) {
-            Some(v) => v,
-            None => return None,
-        };
-
-        let length = match self.input[start..].find(char::is_whitespace) {
-            Some(v) => v,
-            None => self.input[start..].len()
-        };
-
-        let s = &self.input[start..start+length];
-        self.input = &self.input[start + length..];
-
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "+" => Some(Ok(Token::Add)),
-            "-" => Some(Ok(Token::Sub)),
-            "*" => Some(Ok(Token::Mul)),
-            "/" => Some(Ok(Token::Div)),
+            "+" => Ok(Token::Add),
+            "-" => Ok(Token::Sub),
+            "*" => Ok(Token::Mul),
+            "/" => Ok(Token::Div),
             _ => {
                 if s.chars().next().unwrap().is_alphabetic() {
-                    Some(Ok(Token::Variable(s.to_string())))
+                    Ok(Token::Variable(s.to_string()))
                 } else {
-                    Some(s.parse().map(Token::Number))
+                    s.parse().map(Token::Number)
                 }
             }
         }
     }
 }
 
-fn lex(input: &str) -> Result<Vec<Token>, std::num::ParseFloatError> {
-    Lexer::new(input).collect()
+fn lex(input: &str) -> impl Iterator<Item = Result<Token, std::num::ParseFloatError>> + '_ {
+    input
+        .split_whitespace()
+        .flat_map(split_str)
+        .map(Token::from_str)
+}
+
+fn split_str(mut input: &str) -> impl Iterator<Item = &str> {
+    let mut substrs = vec![];
+    loop {
+        if let Some(mut pos) = input.find(splits_input) {
+            pos = pos.max(1);
+            substrs.push(&input[0..pos]);
+            input = &input[pos..];
+        } else {
+            if !input.is_empty() {
+                substrs.push(input);
+            }
+            break;
+        }
+    }
+
+    substrs.into_iter()
+}
+
+fn splits_input(c: char) -> bool {
+    match c {
+        '+' | '-' | '*' | '/' => true,
+        _ => c.is_whitespace(),
+    }
 }
 
 #[derive(Debug)]
@@ -106,7 +111,10 @@ impl Error for ParseError {
     }
 }
 
-fn get_number(token: &Token, var_lookup: &HashMap<String, usize>) -> Result<Expression, ParseError> {
+fn get_number(
+    token: &Token,
+    var_lookup: &HashMap<String, usize>,
+) -> Result<Expression, ParseError> {
     match token {
         Token::Number(n) => Ok(Expression::Number(*n)),
         Token::Variable(s) => Ok(Expression::Variable(
@@ -181,32 +189,34 @@ fn execute_operation(operation: &Operation, vars: &[f32]) -> f32 {
 }
 
 fn parse(input: &str, var_lookup: &HashMap<String, usize>) -> Result<Operation, ParseError> {
-    let tokens = lex(input).map_err(ParseError::LexerError)?;
+    let tokens = lex(input)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ParseError::LexerError)?;
 
     parse_tokens(
         get_number(&tokens[0], var_lookup)?,
         &tokens[1..],
         var_lookup,
     )
-
 }
 
 fn prepare_var_lookup(var_lookup: &HashMap<String, f32>) -> (HashMap<String, usize>, Vec<f32>) {
-    var_lookup.iter()
+    var_lookup
+        .iter()
         .enumerate()
-        .map(|(i, (k, v))| {
-            ((k.clone(), i), v)
-        })
+        .map(|(i, (k, v))| ((k.clone(), i), v))
         .unzip()
 }
-
 
 #[cfg(test)]
 mod test {
 
     use super::*;
 
-    fn parse_and_execute(input: &str, var_lookup: &HashMap<String, f32>) -> Result<f32, ParseError> {
+    fn parse_and_execute(
+        input: &str,
+        var_lookup: &HashMap<String, f32>,
+    ) -> Result<f32, ParseError> {
         let (key_lookup, args) = prepare_var_lookup(var_lookup);
         let operation = parse(input, &key_lookup)?;
 
@@ -254,6 +264,11 @@ mod test {
     }
 
     #[test]
+    fn nospace() {
+        assert!(f32::abs(parse_and_execute("1/2+3*4-1", &HashMap::new()).unwrap() - 11.5) < 0.0001);
+    }
+
+    #[test]
     fn apply_math_to_multiple_variables() {
         let statement = "x * x - y - y";
         let variables = [("x".to_string(), 3.0), ("y".to_string(), 5.0)]
@@ -272,10 +287,7 @@ fn main() {
     let statement = args.next().expect("First argument should be statement");
     let mut vars = HashMap::new();
     for key in args {
-        vars.insert(
-            key.to_string(),
-            0f32,
-        );
+        vars.insert(key.to_string(), 0f32);
     }
 
     let (var_lookup, mut args) = prepare_var_lookup(&vars);
@@ -306,11 +318,8 @@ fn main() {
             *v = i as f32;
         }
 
-
         total += execute_operation(&operation, &args);
     }
 
     println!("total: {total}");
-
-
 }
