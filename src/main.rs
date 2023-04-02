@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, error::Error, fmt, str::FromStr};
+use std::{collections::HashMap, error::Error, fmt, str::FromStr};
 
 #[derive(Debug)]
 enum Expression {
@@ -20,6 +20,8 @@ enum Token {
     //NOTE sorted by priority for easy comparison later
     Variable(String),
     Number(f32),
+    OpenParen,
+    ClosedParen,
     Mul,
     Div,
     Sub,
@@ -35,6 +37,8 @@ impl FromStr for Token {
             "-" => Ok(Token::Sub),
             "*" => Ok(Token::Mul),
             "/" => Ok(Token::Div),
+            "(" => Ok(Token::OpenParen),
+            ")" => Ok(Token::ClosedParen),
             _ => {
                 if s.chars().next().unwrap().is_alphabetic() {
                     Ok(Token::Variable(s.to_string()))
@@ -73,7 +77,7 @@ fn split_str(mut input: &str) -> impl Iterator<Item = &str> {
 
 fn splits_input(c: char) -> bool {
     match c {
-        '+' | '-' | '*' | '/' => true,
+        '+' | '-' | '*' | '/' | '(' | ')' => true,
         _ => c.is_whitespace(),
     }
 }
@@ -84,6 +88,7 @@ enum ParseError {
     NotEnoughTokens,
     NonNumberToken,
     NonOpToken,
+    UnmatchedParen,
     UndefinedVaraible(String),
 }
 
@@ -94,6 +99,7 @@ impl fmt::Display for ParseError {
             ParseError::NotEnoughTokens => write!(f, "Not enough tokens"),
             ParseError::NonNumberToken => write!(f, "Did not find expected number token"),
             ParseError::NonOpToken => write!(f, "Did not find expected op token"),
+            ParseError::UnmatchedParen => write!(f, "Unmatched open bracket"),
             ParseError::UndefinedVaraible(var) => write!(f, "Undefined variable {var}"),
         }
     }
@@ -106,22 +112,53 @@ impl Error for ParseError {
             ParseError::NotEnoughTokens
             | ParseError::NonNumberToken
             | ParseError::NonOpToken
+            | ParseError::UnmatchedParen
             | ParseError::UndefinedVaraible(_) => None,
         }
     }
 }
 
-fn get_number(
-    token: &Token,
+fn get_op_input<'a>(
+    tokens: &'a [Token],
     var_lookup: &HashMap<String, usize>,
-) -> Result<Expression, ParseError> {
-    match token {
-        Token::Number(n) => Ok(Expression::Number(*n)),
-        Token::Variable(s) => Ok(Expression::Variable(
-            *var_lookup
-                .get(s)
-                .ok_or(ParseError::UndefinedVaraible(s.clone()))?,
+) -> Result<(Expression, &'a [Token]), ParseError> {
+    match &tokens[0] {
+        Token::Number(n) => Ok((Expression::Number(*n), &tokens[1..])),
+        Token::Variable(s) => Ok((
+            Expression::Variable(
+                *var_lookup
+                    .get(s)
+                    .ok_or(ParseError::UndefinedVaraible(s.clone()))?,
+            ),
+            &tokens[1..],
         )),
+        Token::OpenParen => {
+            let mut depth = 1;
+            let mut token_idx = 1;
+            while depth > 0 {
+                if token_idx >= tokens.len() {
+                    return Err(ParseError::UnmatchedParen);
+                }
+
+                let token = &tokens[token_idx];
+                match token {
+                    Token::OpenParen => depth += 1,
+                    Token::ClosedParen => depth -= 1,
+                    _ => (),
+                }
+
+                if depth == 0 {
+                    break;
+                }
+
+                token_idx += 1;
+            }
+
+            Ok((
+                parse_tokens(&tokens[1..token_idx], var_lookup)?,
+                &tokens[token_idx + 1..],
+            ))
+        }
         _ => Err(ParseError::NonNumberToken),
     }
 }
@@ -132,42 +169,58 @@ fn make_op(op: &Token, lhs: Expression, rhs: Expression) -> Result<Operation, Pa
         Token::Mul => Operation::Mul(lhs, rhs),
         Token::Div => Operation::Div(lhs, rhs),
         Token::Sub => Operation::Sub(lhs, rhs),
-        Token::Variable(_) | Token::Number(_) => return Err(ParseError::NonOpToken),
+        Token::OpenParen | Token::ClosedParen | Token::Variable(_) | Token::Number(_) => {
+            return Err(ParseError::NonOpToken)
+        }
     };
 
     Ok(ret)
 }
 
-fn parse_tokens(
+fn parse_operation(
     lhs: Expression,
     tokens: &[Token],
     var_lookup: &HashMap<String, usize>,
 ) -> Result<Operation, ParseError> {
-    match tokens.len().cmp(&2) {
-        Ordering::Less => Err(ParseError::NotEnoughTokens),
-        Ordering::Equal => {
-            let rhs = get_number(&tokens[1], var_lookup)?;
-            make_op(&tokens[0], lhs, rhs)
-        }
-        Ordering::Greater => {
-            // Determine if number goes to this op or the next one...
-            let next_op = &tokens[2];
-            let this_op = &tokens[0];
-            let num = get_number(&tokens[1], var_lookup)?;
+    if tokens.len() < 2 {
+        return Err(ParseError::NotEnoughTokens);
+    }
 
-            if next_op < this_op {
-                // next op has higher priority, so number is the lhs of the next operation
-                let rhs = parse_tokens(num, &tokens[2..], var_lookup)?;
-                make_op(this_op, lhs, Expression::Operation(Box::new(rhs)))
-            } else {
-                let lhs = make_op(this_op, lhs, num)?;
-                parse_tokens(
-                    Expression::Operation(Box::new(lhs)),
-                    &tokens[2..],
-                    var_lookup,
-                )
-            }
-        }
+    let this_op = &tokens[0];
+    let (rhs, tokens) = get_op_input(&tokens[1..], var_lookup)?;
+
+    if tokens.is_empty() {
+        return make_op(this_op, lhs, rhs);
+    }
+
+    let next_op = &tokens[0];
+
+    if next_op < this_op {
+        // next op has higher priority, so rhs is the lhs of the next operation
+        let rhs = parse_operation(rhs, tokens, var_lookup)?;
+        make_op(this_op, lhs, Expression::Operation(Box::new(rhs)))
+    } else {
+        let lhs = make_op(this_op, lhs, rhs)?;
+        parse_operation(Expression::Operation(Box::new(lhs)), tokens, var_lookup)
+    }
+}
+
+fn parse_tokens(
+    tokens: &[Token],
+    var_lookup: &HashMap<String, usize>,
+) -> Result<Expression, ParseError> {
+    if tokens.is_empty() {
+        return Err(ParseError::NotEnoughTokens);
+    }
+
+    let (lhs, tokens) = get_op_input(tokens, var_lookup)?;
+
+    if tokens.is_empty() {
+        Ok(lhs)
+    } else {
+        Ok(Expression::Operation(Box::new(parse_operation(
+            lhs, tokens, var_lookup,
+        )?)))
     }
 }
 
@@ -188,16 +241,12 @@ fn execute_operation(operation: &Operation, vars: &[f32]) -> f32 {
     }
 }
 
-fn parse(input: &str, var_lookup: &HashMap<String, usize>) -> Result<Operation, ParseError> {
+fn parse(input: &str, var_lookup: &HashMap<String, usize>) -> Result<Expression, ParseError> {
     let tokens = lex(input)
         .collect::<Result<Vec<_>, _>>()
         .map_err(ParseError::LexerError)?;
 
-    parse_tokens(
-        get_number(&tokens[0], var_lookup)?,
-        &tokens[1..],
-        var_lookup,
-    )
+    parse_tokens(&tokens, var_lookup)
 }
 
 fn prepare_var_lookup(var_lookup: &HashMap<String, f32>) -> (HashMap<String, usize>, Vec<f32>) {
@@ -213,59 +262,104 @@ mod test {
 
     use super::*;
 
+    macro_rules! assert_matches {
+        ($a:expr, $b:pat_param) => {
+            match $a {
+                $b => (),
+                _ => panic!(concat!("{:?} does not match", stringify!($b)), $a),
+            }
+
+        }
+
+    }
+
+    macro_rules! assert_close {
+        ($a:expr, $b:expr) => {
+            assert_close!($a, $b, 0.0001)
+        };
+        ($a:expr, $b:expr, $eps:expr) => {
+            let diff = f32::abs($a - $b);
+            if f32::abs($a - $b) > $eps {
+                panic!(
+                    "{} and {} are {} apart, which is more than {}",
+                    $a, $b, diff, $eps
+                );
+            }
+        };
+    }
+
     fn parse_and_execute(
         input: &str,
         var_lookup: &HashMap<String, f32>,
     ) -> Result<f32, ParseError> {
         let (key_lookup, args) = prepare_var_lookup(var_lookup);
-        let operation = parse(input, &key_lookup)?;
+        let expression = parse(input, &key_lookup)?;
 
-        Ok(execute_operation(&operation, &args))
+        let ret = match expression {
+            Expression::Operation(op) => execute_operation(&op, &args),
+            Expression::Number(n) => n,
+            Expression::Variable(n) => args[n],
+        };
+
+        Ok(ret)
     }
 
     #[test]
     fn simple_addition() {
-        assert!(f32::abs(parse_and_execute("1 + 2", &HashMap::new()).unwrap() - 3.0) < 0.0001);
+        assert_close!(parse_and_execute("1 + 2", &HashMap::new()).unwrap(), 3.0);
     }
 
     #[test]
-    fn simuple_multiplication() {
-        assert!(f32::abs(parse_and_execute("2 * 3", &HashMap::new()).unwrap() - 6.0) < 0.0001);
+    fn simple_multiplication() {
+        assert_close!(parse_and_execute("2 * 3", &HashMap::new()).unwrap(), 6.0);
     }
 
     #[test]
     fn add_then_mul() {
-        assert!(f32::abs(parse_and_execute("1 + 2 * 3", &HashMap::new()).unwrap() - 7.0) < 0.0001);
+        assert_close!(
+            parse_and_execute("1 + 2 * 3", &HashMap::new()).unwrap(),
+            7.0
+        );
     }
 
     #[test]
     fn mul_then_add() {
-        assert!(f32::abs(parse_and_execute("1 * 2 + 3", &HashMap::new()).unwrap() - 5.0) < 0.0001);
+        assert_close!(
+            parse_and_execute("1 * 2 + 3", &HashMap::new()).unwrap(),
+            5.0
+        );
     }
 
     #[test]
     fn add_two_muls() {
-        assert!(
-            f32::abs(parse_and_execute("1 * 2 + 3 * 4", &HashMap::new()).unwrap() - 14.0) < 0.0001
+        assert_close!(
+            parse_and_execute("1 * 2 + 3 * 4", &HashMap::new()).unwrap(),
+            14.0
         );
     }
 
     #[test]
     fn add_sub_mul_div() {
-        assert!(
-            f32::abs(parse_and_execute("1 / 2 + 3 * 4 - 1", &HashMap::new()).unwrap() - 11.5)
-                < 0.0001
+        assert_close!(
+            parse_and_execute("1 / 2 + 3 * 4 - 1", &HashMap::new()).unwrap(),
+            11.5
         );
     }
 
     #[test]
     fn add_sub() {
-        assert!(f32::abs(parse_and_execute("1 - 2 + 3", &HashMap::new()).unwrap() - 2.0) < 0.0001);
+        assert_close!(
+            parse_and_execute("1 - 2 + 3", &HashMap::new()).unwrap(),
+            2.0
+        );
     }
 
     #[test]
     fn nospace() {
-        assert!(f32::abs(parse_and_execute("1/2+3*4-1", &HashMap::new()).unwrap() - 11.5) < 0.0001);
+        assert_close!(
+            parse_and_execute("1/2+3*4-1", &HashMap::new()).unwrap(),
+            11.5
+        );
     }
 
     #[test]
@@ -276,6 +370,45 @@ mod test {
             .collect();
 
         assert!(f32::abs(parse_and_execute(statement, &variables).unwrap() + 1.0) < 0.0001);
+    }
+
+    #[test]
+    fn test_simple_paren() {
+        let statement = "(3 * 4) + (5 * 6)";
+
+        assert_close!(parse_and_execute(statement, &HashMap::new()).unwrap(), 42.0);
+    }
+
+    #[test]
+    fn test_paren_single_number() {
+        let statement = "(3) + (5 * 6)";
+
+        assert_close!(parse_and_execute(statement, &HashMap::new()).unwrap(), 33.0);
+    }
+
+    #[test]
+    fn test_double_paren_single_number() {
+        let statement = "((3)) + (5 * 6)";
+
+        assert_close!(parse_and_execute(statement, &HashMap::new()).unwrap(), 33.0);
+    }
+
+    #[test]
+    fn test_double_paren() {
+        let statement = "((3 * 4)) + (5 * 6)";
+
+        assert_close!(parse_and_execute(statement, &HashMap::new()).unwrap(), 42.0);
+    }
+
+    #[test]
+    fn test_unmatched_paren() {
+        let statement = "((3 * 4)) + (5 * 6";
+        match parse_and_execute(statement, &HashMap::new()) {
+            Ok(_) => panic!("Unexpected success"),
+            Err(e) => {
+                assert_matches!(e, ParseError::UnmatchedParen);
+            }
+        }
     }
 }
 
@@ -290,10 +423,10 @@ fn main() {
         vars.insert(key.to_string(), 0f32);
     }
 
-    let (var_lookup, mut args) = prepare_var_lookup(&vars);
+    let (var_lookup, args) = prepare_var_lookup(&vars);
 
-    let operation = parse(&statement, &var_lookup);
-    let operation = match operation {
+    let expression = parse(&statement, &var_lookup);
+    let expression = match expression {
         Ok(v) => v,
         Err(e) => {
             println!("Failed to execute statement: {e}");
@@ -312,14 +445,15 @@ fn main() {
         }
     };
 
-    let mut total = 0f32;
-    for i in 0..1000000 {
-        for v in &mut args {
-            *v = i as f32;
+    match expression {
+        Expression::Operation(op) => {
+            println!("{}", execute_operation(&op, &args));
         }
-
-        total += execute_operation(&operation, &args);
+        Expression::Variable(v) => {
+            println!("{}", args[v]);
+        }
+        Expression::Number(n) => {
+            println!("{n}");
+        }
     }
-
-    println!("total: {total}");
 }
