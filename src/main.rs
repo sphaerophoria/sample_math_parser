@@ -13,12 +13,15 @@ enum Operation {
     Mul(Expression, Expression),
     Div(Expression, Expression),
     Sub(Expression, Expression),
+    Cos(Expression),
+    Sin(Expression),
+    Sqrt(Expression),
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
 enum Token {
     //NOTE sorted by priority for easy comparison later
-    Variable(String),
+    Identifier(String),
     Number(f32),
     OpenParen,
     ClosedParen,
@@ -41,7 +44,7 @@ impl FromStr for Token {
             ")" => Ok(Token::ClosedParen),
             _ => {
                 if s.chars().next().unwrap().is_alphabetic() {
-                    Ok(Token::Variable(s.to_string()))
+                    Ok(Token::Identifier(s.to_string()))
                 } else {
                     s.parse().map(Token::Number)
                 }
@@ -90,6 +93,7 @@ enum ParseError {
     NonOpToken,
     UnmatchedParen,
     UndefinedVaraible(String),
+    UnsupportedFn(String),
 }
 
 impl fmt::Display for ParseError {
@@ -101,6 +105,7 @@ impl fmt::Display for ParseError {
             ParseError::NonOpToken => write!(f, "Did not find expected op token"),
             ParseError::UnmatchedParen => write!(f, "Unmatched open bracket"),
             ParseError::UndefinedVaraible(var) => write!(f, "Undefined variable {var}"),
+            ParseError::UnsupportedFn(var) => write!(f, "Unsupported function {var}"),
         }
     }
 }
@@ -113,9 +118,41 @@ impl Error for ParseError {
             | ParseError::NonNumberToken
             | ParseError::NonOpToken
             | ParseError::UnmatchedParen
+            | ParseError::UnsupportedFn(_)
             | ParseError::UndefinedVaraible(_) => None,
         }
     }
+}
+
+fn matching_close_paren(tokens: &[Token], start_idx: usize) -> Result<usize, ParseError> {
+    match &tokens[start_idx] {
+        Token::OpenParen => (),
+        _ => {
+            panic!("matching_close_paren called with invalid inputs");
+        }
+    }
+
+    let mut depth = 1;
+    let mut token_idx = start_idx + 1;
+    while depth > 0 {
+        if token_idx >= tokens.len() {
+            return Err(ParseError::UnmatchedParen);
+        }
+
+        let token = &tokens[token_idx];
+        match token {
+            Token::OpenParen => depth += 1,
+            Token::ClosedParen => depth -= 1,
+            _ => (),
+        }
+
+        if depth == 0 {
+            break;
+        }
+
+        token_idx += 1;
+    }
+    Ok(token_idx)
 }
 
 fn get_op_input<'a>(
@@ -124,39 +161,37 @@ fn get_op_input<'a>(
 ) -> Result<(Expression, &'a [Token]), ParseError> {
     match &tokens[0] {
         Token::Number(n) => Ok((Expression::Number(*n), &tokens[1..])),
-        Token::Variable(s) => Ok((
-            Expression::Variable(
-                *var_lookup
-                    .get(s)
-                    .ok_or(ParseError::UndefinedVaraible(s.clone()))?,
-            ),
-            &tokens[1..],
-        )),
-        Token::OpenParen => {
-            let mut depth = 1;
-            let mut token_idx = 1;
-            while depth > 0 {
-                if token_idx >= tokens.len() {
-                    return Err(ParseError::UnmatchedParen);
-                }
-
-                let token = &tokens[token_idx];
-                match token {
-                    Token::OpenParen => depth += 1,
-                    Token::ClosedParen => depth -= 1,
-                    _ => (),
-                }
-
-                if depth == 0 {
-                    break;
-                }
-
-                token_idx += 1;
+        Token::Identifier(s) => {
+            if tokens.len() > 1 && tokens[1] == Token::OpenParen {
+                let close_idx = matching_close_paren(tokens, 1)?;
+                let fn_arg = parse_tokens(&tokens[2..close_idx], var_lookup)?;
+                let operation = match s.as_str() {
+                    "cos" => Operation::Cos(fn_arg),
+                    "sin" => Operation::Sin(fn_arg),
+                    "sqrt" => Operation::Sqrt(fn_arg),
+                    _ => return Err(ParseError::UnsupportedFn(s.to_string())),
+                };
+                Ok((
+                    Expression::Operation(Box::new(operation)),
+                    &tokens[close_idx + 1..],
+                ))
+            } else {
+                Ok((
+                    Expression::Variable(
+                        *var_lookup
+                            .get(s)
+                            .ok_or(ParseError::UndefinedVaraible(s.clone()))?,
+                    ),
+                    &tokens[1..],
+                ))
             }
+        }
+        Token::OpenParen => {
+            let close_idx = matching_close_paren(tokens, 0)?;
 
             Ok((
-                parse_tokens(&tokens[1..token_idx], var_lookup)?,
-                &tokens[token_idx + 1..],
+                parse_tokens(&tokens[1..close_idx], var_lookup)?,
+                &tokens[close_idx + 1..],
             ))
         }
         _ => Err(ParseError::NonNumberToken),
@@ -169,7 +204,7 @@ fn make_op(op: &Token, lhs: Expression, rhs: Expression) -> Result<Operation, Pa
         Token::Mul => Operation::Mul(lhs, rhs),
         Token::Div => Operation::Div(lhs, rhs),
         Token::Sub => Operation::Sub(lhs, rhs),
-        Token::OpenParen | Token::ClosedParen | Token::Variable(_) | Token::Number(_) => {
+        Token::OpenParen | Token::ClosedParen | Token::Identifier(_) | Token::Number(_) => {
             return Err(ParseError::NonOpToken)
         }
     };
@@ -238,6 +273,9 @@ fn execute_operation(operation: &Operation, vars: &[f32]) -> f32 {
         Operation::Mul(a, b) => resolve_expression(a, vars) * resolve_expression(b, vars),
         Operation::Div(a, b) => resolve_expression(a, vars) / resolve_expression(b, vars),
         Operation::Sub(a, b) => resolve_expression(a, vars) - resolve_expression(b, vars),
+        Operation::Cos(a) => f32::cos(resolve_expression(a, vars)),
+        Operation::Sin(a) => f32::sin(resolve_expression(a, vars)),
+        Operation::Sqrt(a) => f32::sqrt(resolve_expression(a, vars)),
     }
 }
 
@@ -268,9 +306,7 @@ mod test {
                 $b => (),
                 _ => panic!(concat!("{:?} does not match", stringify!($b)), $a),
             }
-
-        }
-
+        };
     }
 
     macro_rules! assert_close {
@@ -409,6 +445,48 @@ mod test {
                 assert_matches!(e, ParseError::UnmatchedParen);
             }
         }
+    }
+
+    #[test]
+    fn test_cos_call() {
+        let statement = "4 * cos(x)";
+        let mut args = [("x", 3.1415962 / 2.0)]
+            .into_iter()
+            .map(|(x, y)| (x.to_string(), y))
+            .collect();
+
+        assert_close!(parse_and_execute(statement, &args).unwrap(), 0.0);
+
+        args.get_mut("x").map(|v| *v = 3.1415962);
+        assert_close!(parse_and_execute(statement, &args).unwrap(), -4.0);
+    }
+
+    #[test]
+    fn test_sin_call() {
+        let statement = "4 * sin(x)";
+        let mut args = [("x", 3.1415962 / 2.0)]
+            .into_iter()
+            .map(|(x, y)| (x.to_string(), y))
+            .collect();
+
+        assert_close!(parse_and_execute(statement, &args).unwrap(), 4.0);
+
+        args.get_mut("x").map(|v| *v = 3.1415962);
+        assert_close!(parse_and_execute(statement, &args).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_sqrt_call() {
+        let statement = "1 + sqrt(x)";
+        let mut args = [("x", 4.0)]
+            .into_iter()
+            .map(|(x, y)| (x.to_string(), y))
+            .collect();
+
+        assert_close!(parse_and_execute(statement, &args).unwrap(), 3.0);
+
+        args.get_mut("x").map(|v| *v = 9.0);
+        assert_close!(parse_and_execute(statement, &args).unwrap(), 4.0);
     }
 }
 
